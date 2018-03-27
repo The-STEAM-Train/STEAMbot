@@ -1,22 +1,27 @@
 /*
-   Copyright (c) 2017, The STEAM Train
+   Copyright (c) 2017, 2018, The STEAM Train
 
    Default program for a STEAMbot robot. Written by Aram Perez
 
 */
 
 #include <STEAMbot.h>
+#include <Servo.h>
 
-//#define DEBUGGING_BT    //If defined, debugging information is sent to the Serial port (USB)
+#define DEBUGGING_BT    //If defined, debugging information is sent to the Serial port (USB)
 //#define DO_LINE_MODE    //If you have the Line Following Add-on Kit, uncomment this line
 
-#define STOPPING_DISTANCE 15  //centimeters
+#define CR '\r'
+#define LF '\n'
+
+#define STOPPING_DISTANCE 15 //centimeters
 #define FAR_FORWARD_DISTANCE 35
 #define NEAR_FORWARD_DISTANCE 20
 #define BACKWARD_DISTANCE 10
 #define PET_FORWARD_SPEED 50
 
 #define BUTTON_DEBOUNCE 50
+#define NOTE_DURATION 80
 
 #ifdef DO_LINE_MODE
 #define LEFT_LINE_SENSOR_PIN PB5
@@ -29,7 +34,11 @@ sbDigitalInput lineSensorL(LEFT_LINE_SENSOR_PIN);
 sbDigitalInput lineSensorR(RIGHT_LINE_SENSOR_PIN);
 #endif
 
-sbTimer rgbTimer(500, true);  //Auto restart timer
+sbTimer rgbTimer(500, true); //Auto restart timer
+Servo srv1, srv2, srv3;
+bool s1Configured, s2Configured, s3Configured;
+
+const char defaultProgramVersion[] = "1.1.1";
 
 typedef enum movingState_t {
   movingBackward = -1,
@@ -40,13 +49,13 @@ typedef enum movingState_t {
 movingState_t movingState = stopped;
 
 typedef enum modes {
-  bluetooth,    //Controlled over Bluetooth
-  pet,          //Pet mode, move forward/backward depending on USS
-  line          //Follow a line
+  bluetooth, //Bluetooth controlled mode
+  pet,       //Pet mode, move forward/backward depending on USS
+  line       //Line following mode
 } modes_t;
 mode_t currentMode;
 
-bool useUss = false;
+bool autoStop = false;
 
 #ifdef DO_LINE_MODE
 typedef enum lineModes {
@@ -56,18 +65,19 @@ typedef enum lineModes {
 lineModes_t lineMode;
 #endif
 
-//const char csVersion[] = "STEAMbot v1.0.0";
-
 unsigned melodyNotes[] = {
   NOTE_C4, NOTE_G3, NOTE_G3, NOTE_A3, NOTE_G3, 0, NOTE_B3, NOTE_C4
 };
 
-void showChange(int nbr, sbRGB::color_t newColor) {
+void showChange(int nbr, sbRGB::color_t newColor)
+{
   unsigned startNote = 300;
-  for ( int i = 0; i < nbr; i++ ) {
+  for (int i = 0; i < nbr; i++)
+  {
     sb.speaker.playNote(startNote + i * 300, 333);
   }
-  for (int i = 0; i < 8; i++ ) {
+  for (int i = 0; i < 8; i++)
+  {
     sb.rgb.nextColor();
     delay(100);
   }
@@ -78,7 +88,8 @@ void showChange(int nbr, sbRGB::color_t newColor) {
 #endif
 }
 
-void switchToBluetoothMode() {
+void switchToBluetoothMode()
+{
   sb.motors.stop();
   currentMode = bluetooth;
   movingState = stopped;
@@ -94,11 +105,12 @@ inline void switchToPetMode()
 }
 
 #ifdef DO_LINE_MODE
-void switchToLineMode() {
+void switchToLineMode()
+{
   sb.motors.stop();
   currentMode = line;
   lineMode = waitingForButton;
-  rgbTmr.start();
+  rgbTimer.start();
   showChange(3, sbRGB::yellow);
 }
 #endif
@@ -114,158 +126,355 @@ void setup()
   sbBt.begin(SB_BT_BAUD);
   checkBtName();
   switchToBluetoothMode();
+  s1Configured = s2Configured = s3Configured = false;
 #if defined(DEBUGGING_BT)
   Serial.println("STEAMbot is ready.");
 #endif
 }
 
-int getSignedByte() {
-  uint8_t val;
-  do {
-    val = sbBt.read();
-  } while ( val == 0xFF );
-  if ( val & 0x80 ) { //If negative
-    return val | 0xFFFFFF00;  //Sign extend
-  }
+uint8_t getByte()
+{
+  while ( sbBt.available() == 0 );
+  return (uint8_t) sbBt.read();
+}
+
+uint16_t getUint16() //Big endian
+{
+  uint16_t val = getByte() << 8;
+  val |= getByte();
   return val;
+}
+
+bool getPin(uint8_t& pinNbr) {
+  static const uint8_t pinMap[] = {PA8, PB2, PB5, PB6, PB7};
+  bool rv = false;
+  uint8_t ndx = getByte();
+  if ( ndx < sizeof(pinMap) ) {
+    pinNbr = pinMap[ndx];
+    rv = true;
+  }
+  return rv;
 }
 
 void doBluetoothMode()
 {
   static uint8_t currentColor = 0;
-  int val1, val2;
-  uint8_t cmd;
+  int8_t iv1, iv2;
+  uint8_t cmd, pin, uiv;
+  uint16_t freq, dur;
   sbRGB::color_t color;
   float cm;
 
-  if (sbBt.available() > 0) {
+  if (sbBt.available() > 0)//Big endian
+  {
     cmd = sbBt.read();
-    sbBt.write(cmd);
-#ifdef DEBUGGING_BT
-    Serial.write(cmd);
-#endif
-    switch (cmd) {
-      case 1:   //Move command
-        // set left and right motor speeds
-        val1 = getSignedByte();
-        val2 = getSignedByte();
-        sb.motors.run(val1, val2);
-        sbBt.write('\r');
-        if ( val1 == 0 && val2 == 0 ) {
+    switch (cmd)
+    {
+      case 1: //Move left and right motors
+        iv1 = (int8_t) getByte();
+        iv2 = (int8_t) getByte();
+        sb.motors.run(iv1, iv2);
+        if (iv1 == 0 && iv2 == 0)
+        {
           movingState = stopped;
-        } else if ( val1 > 0 && val2 > 0 ) {
+        }
+        else if (iv1 > 0 && iv2 > 0)
+        {
           movingState = movingForward;
-        } else if ( val1 < 0 && val2 < 0 ) {
+        }
+        else if (iv1 < 0 && iv2 < 0)
+        {
           movingState = movingBackward;
-        } else {
+        }
+        else
+        {
           movingState = turning;
         }
+        sbBt.write(cmd);
 #ifdef DEBUGGING_BT
-        Serial.print(val1);
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.print(cmd);
+        Serial.print(iv1);
         Serial.print(',');
-        Serial.println(val2);
+        Serial.print(iv2);
 #endif
         break;
-      case 'i':
-        // inform about robot
-        sbBt.print(STEAMbot::version);
-#ifdef DEBUGGING_BT
-        Serial.println(STEAMbot::version);
-#endif
-        break;
-      case 'R':
-        sb.motors.stop();
-        sbBt.write('\r');
-        movingState = stopped;
-#ifdef DEBUGGING_BT
-        Serial.println();
-#endif
-        break;
-      case 'r':
-        val1 = getSignedByte() & 7;
-        sb.rgb.setColor(val1);
-        sbBt.write('\r');
-#ifdef DEBUGGING_BT
-        Serial.println(val1);
-#endif
-        break;
-      case 'b':   //Beep
-        sb.speaker.beep();
-        sbBt.write('\r');
-#ifdef DEBUGGING_BT
-        Serial.println();
-#endif
-        break;
-      case 'n':
-        val1 = sb.rgb.nextColor();
-        sbBt.write(val1);
-        sbBt.write('\r');
-#ifdef DEBUGGING_BT
-        Serial.println(val1);
-#endif
-        break;
-      case '\r':
-      case '\n':
-        //ignore CR and NL
-        break;
-      case 'c':
-        cm = sb.ultrasonic.centimeters();
-        sbBt.print(cm);   //Send distance in ASCII
-        sbBt.write('\r');
-#ifdef DEBUGGING_BT
-        Serial.println(cm);
-#endif
-        break;
-      case 'm':
-        for (int i = 0; i < sizeof(melodyNotes) / sizeof(melodyNotes[0]); i++ ) {
-          if ( i == 1 || i == 2 ) {
-            sb.speaker.playNote(melodyNotes[i], 125);
-          } else {
-            sb.speaker.playNote(melodyNotes[i], 250);
-          }
-        }
-        break;
-      case '`':
-        sbBt.write('\r');
-        while (true) {
-          val1 = sbBt.read();
-          if ( val1 == '\r' ) {
+      case 'B': //Return RUN or STOP button state
+        pin = getByte();
+        switch ( pin ) {
+          case 0:
+            uiv = sb.runButton.isPressed(BUTTON_DEBOUNCE) ? 1 : 0;
             break;
-          }
-#ifdef DEBUGGING_BT
-          Serial.print(val1, HEX);
-          Serial.print(' ');
-#endif
+          case 1:
+            uiv = sb.stopButton.isPressed(BUTTON_DEBOUNCE) ? 1 : 0;
+            break;
         }
+        sbBt.write(cmd);
+        sbBt.write(uiv);
 #ifdef DEBUGGING_BT
-        Serial.println();
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.print(cmd);
+        Serial.print(pin);
+        Serial.print(',');
+        Serial.print(uiv);
 #endif
         break;
-      case 'u':
-        useUss = !useUss;
-        sbBt.write('\r');
+      case 'M': //Set pin mode (PA8, PB2, PB5, PB6, PB7)
+        pin = uiv = 0xFF;
+        if ( getPin(pin) ) {
+          uiv = getByte();
+          switch ( uiv ) {
+            case 0:
+              pinMode(pin, INPUT);
+              break;
+            case 1:
+              pinMode(pin, INPUT_PULLUP);
+              break;
+            case 2:
+              pinMode(pin, OUTPUT);
+              break;
+          }
+        }
+        sbBt.write(cmd);
 #ifdef DEBUGGING_BT
-        Serial.println(cmd);
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(pin);
+        Serial.print(',');
+        Serial.print(uiv);
 #endif
+        break;
+      case 'o': //Output to a pin (PA8, PB2, PB5, PB6, PB7)
+        pin = uiv = 0xFF;
+        if ( getPin(pin) ) {
+          uiv = getByte();
+          digitalWrite(pin, uiv != 0 ? HIGH : LOW );
+        }
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(pin);
+        Serial.print(',');
+        Serial.print(uiv);
+#endif
+        break;
+      case 'i': //Return the input level of a pin (PA8, PB2, PB5, PB6, PB7)
+        pin = 0xFF;
+        uiv = 0;
+        if ( getPin(pin) ) {
+          uiv = digitalRead(pin);
+        }
+        sbBt.write(cmd);
+        sbBt.write(uiv);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(pin);
+        Serial.print(',');
+        Serial.print(uiv);
+#endif
+        break;
+      case 'v': // Get version numbers, first the library versio and then the this program's version
+        sbBt.write(cmd);
+        sbBt.print(STEAMbot::version);
+        sbBt.write(',');
+        sbBt.print(defaultProgramVersion);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(STEAMbot::version);
+        Serial.write(',');
+        Serial.print(defaultProgramVersion);
+#endif
+        break;
+      case 'r': //Set the color of the RGB LED
+        uiv = getByte() & 7;
+        sb.rgb.setColor(uiv);
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(uiv);
+#endif
+        break;
+      case 'n': //Set the next color of the RGB LED
+        uiv = sb.rgb.nextColor();
+        sbBt.write(cmd);
+        sbBt.write(uiv);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(uiv);
+#endif
+        break;
+      case 'b': //Beep
+        sb.speaker.beep();
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+#endif
+        break;
+      case 'm': //Play the builtin melody
+        for (int i = 0; i < sizeof(melodyNotes) / sizeof(melodyNotes[0]); i++)
+        {
+          if (i == 1 || i == 2)
+          {
+            sb.speaker.playNote(melodyNotes[i], NOTE_DURATION);
+          }
+          else
+          {
+            sb.speaker.playNote(melodyNotes[i], 2 * NOTE_DURATION);
+          }
+        }
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+#endif
+        break;
+      case 'c': //Get the distance in centimeters
+        cm = sb.ultrasonic.centimeters();
+        cm += sb.ultrasonic.centimeters();
+        cm /= 2;
+        sbBt.write(cmd);
+        sbBt.print(cm); //Send distance in ASCII
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(cm);
+#endif
+        break;
+      case 't': //Play a note (tone)
+        freq = getUint16();
+        dur = getUint16();
+        sb.speaker.playNote(freq, dur);
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(freq);
+        Serial.print(',');
+        Serial.print(dur);
+#endif
+        break;
+      case 'u': //Toggle autostop
+        autoStop = !autoStop;
+        sbBt.write(cmd);
+        sbBt.write(autoStop ? 1 : 0);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(autoStop);
+#endif
+        break;
+      case 's': //Set angle of a servo (SRV1/PB7, SRV2/PB6)
+        pin = getByte();
+        uiv = getByte(); //Get the angle
+        if ( uiv > 180 ) {
+          uiv = 180;
+        }
+        switch ( pin ) {
+          case 0:
+            if ( s1Configured ) {
+              srv1.write(uiv);
+            }
+            break;
+          case 1:
+            if ( s2Configured ) {
+              srv2.write(uiv);
+            }
+            break;
+          case 3:
+            if ( s3Configured ) {
+              srv3.write(uiv);
+            }
+            break;
+        }
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(pin);
+        Serial.print(',');
+        Serial.print(uiv);
+#endif
+        break;
+      case 'S': //Configure a servo
+        pin = getByte();
+        switch ( pin ) {
+          case 0:
+            if ( !s1Configured ) {
+              srv1.attach(PB7);
+              s1Configured = true;
+            }
+            break;
+          case 1:
+            if ( !s2Configured ) {
+              srv2.attach(PB6);
+              s2Configured = true;
+            }
+            break;
+          case 2:
+            if ( !s3Configured ) {
+              srv3.attach(PA8);
+              s3Configured = true;
+            }
+            break;
+        }
+        sbBt.write(cmd);
+#ifdef DEBUGGING_BT
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.write(cmd);
+        Serial.print(pin);
+#endif
+        break;
+      case CR: //ignore CR and LF
+      case LF:
         break;
       default:
         // inform user of non existing command
-        sbBt.print("?\r");
+        sbBt.write('?');
+        sbBt.write(cmd);
 #ifdef DEBUGGING_BT
-        Serial.println("?");
+        sbBt.write(CR);
+        sbBt.flush();
+        Serial.print('?');
+        Serial.print(cmd, HEX);
 #endif
     }
+#ifdef DEBUGGING_BT
+    Serial.println();
+#else
+    sbBt.write(CR);
     sbBt.flush();
+#endif
   }
-  if ( sb.runButton.isPressed(BUTTON_DEBOUNCE) ) {
-    sb.speaker.beep();
-  }
-  if ( useUss && movingState == movingForward ) {
+  if (autoStop && movingState == movingForward)
+  {
     cm = sb.ultrasonic.centimeters();
-    if ( cm < STOPPING_DISTANCE ) {
-      delay(100);
+    if (cm < STOPPING_DISTANCE)
+    {
+      delay(50);
       cm = sb.ultrasonic.centimeters();
-      if ( cm < STOPPING_DISTANCE ) {
+      if (cm < STOPPING_DISTANCE)
+      {
         sb.motors.stop();
         movingState = stopped;
 #ifdef DEBUGGING_BT
@@ -281,8 +490,10 @@ void doBluetoothMode()
 void doPetMode()
 {
   float cm = sb.ultrasonic.centimeters();
-  if ( cm < BACKWARD_DISTANCE ) {
-    switch ( movingState ) {
+  if (cm < BACKWARD_DISTANCE)
+  {
+    switch (movingState)
+    {
       case movingForward:
         sb.motors.stop();
         delay(300);
@@ -297,8 +508,11 @@ void doPetMode()
 #endif
         break;
     }
-  } else if ( cm > NEAR_FORWARD_DISTANCE && cm < FAR_FORWARD_DISTANCE ) {
-    switch ( movingState ) {
+  }
+  else if (cm > NEAR_FORWARD_DISTANCE && cm < FAR_FORWARD_DISTANCE)
+  {
+    switch (movingState)
+    {
       case movingBackward:
         sb.motors.stop();
 #ifdef DEBUGGING_BT
@@ -314,8 +528,11 @@ void doPetMode()
         movingState = movingForward;
         break;
     }
-  } else {
-    if ( movingState != stopped ) {
+  }
+  else
+  {
+    if (movingState != stopped)
+    {
       sb.motors.stop();
       movingState = stopped;
       sb.rgb.setOnColor(sbRGB::aqua);
@@ -325,20 +542,24 @@ void doPetMode()
 #endif
     }
   }
-  if ( rgbTimer.timedOut() ) {
+  if (rgbTimer.timedOut())
+  {
     sb.rgb.toggle();
   }
   delay(100);
 }
 
 #ifdef DO_LINE_MODE
-void doLineMode() {
+void doLineMode()
+{
   static bool finished;
   bool wait;
   int movement;
-  switch ( lineMode ) {
+  switch (lineMode)
+  {
     case waitingForButton:
-      if ( sb.runButton.isPressed(BUTTON_DEBOUNCE) ) {
+      if (sb.runButton.isPressed(BUTTON_DEBOUNCE))
+      {
         lineMode = following;
         finished = false;
         sb.rgb.setColor(sbRGB::green);
@@ -351,37 +572,39 @@ void doLineMode() {
       movement = 0;
       movement |= lineSensorL.read() ? 1 : 0;
       movement |= lineSensorR.read() ? 2 : 0;
-      switch ( movement ) {
+      switch (movement)
+      {
         case 1:
-          sb.motors.run(TURN_SPEED, -TURN_SPEED);  //Turn right
+          sb.motors.run(TURN_SPEED, -TURN_SPEED); //Turn right
           wait = true;
-          //          Serial.print('R');
           break;
         case 2:
-          sb.motors.run(-TURN_SPEED, TURN_SPEED);  //Turn left
+          sb.motors.run(-TURN_SPEED, TURN_SPEED); //Turn left
           wait = true;
-          //          Serial.print('L');
           break;
         case 3:
           sb.motors.run(FORWARD_SPEED, FORWARD_SPEED);
-          //          Serial.print('F');
           break;
         default:
-          //          Serial.print('S');
           finished = true;
       }
-      if ( wait ) {
-        do {
+      if (wait)
+      {
+        do
+        {
           bool overLineL = lineSensorL.read();
           bool overLineR = lineSensorR.read();
-          if ( overLineL && overLineR ) break;
-          if ( !overLineL && !overLineR ) {
+          if (overLineL && overLineR)
+            break;
+          if (!overLineL && !overLineR)
+          {
             finished = true;
             break;
           }
-        } while ( true );
+        } while (true);
       }
-      if ( finished ) {
+      if (finished)
+      {
         sb.motors.stop();
         sb.speaker.beep();
         delay(100);
@@ -389,18 +612,22 @@ void doLineMode() {
         lineMode = waitingForButton;
       }
   }
-  if ( rgbTmr.timedOut() ) {
+  if (rgbTimer.timedOut())
+  {
     sb.rgb.toggle();
   }
 }
 #endif
 
-void loop() {
-  if ( sb.stopButton.isPressed(BUTTON_DEBOUNCE) ) {
+void loop()
+{
+  if (sb.runButton.isPressed(BUTTON_DEBOUNCE) && sb.stopButton.isPressed(BUTTON_DEBOUNCE))
+  {
 #ifdef DEBUGGING_BT
     Serial.print("Switching modes... ");
 #endif
-    switch ( currentMode ) {
+    switch (currentMode)
+    {
       case bluetooth:
         switchToPetMode();
         break;
@@ -413,7 +640,8 @@ void loop() {
         switchToBluetoothMode();
     }
   }
-  switch ( currentMode ) {
+  switch (currentMode)
+  {
     case pet:
       doPetMode();
       break;
@@ -427,7 +655,8 @@ void loop() {
   }
 }
 
-void checkBtName() {
+void checkBtName()
+{
   char bfr[65];
   byte nbrRead;
 
@@ -437,7 +666,8 @@ void checkBtName() {
   delay(150);
   sbBt.print("AT+NEIN0");
   nbrRead = sbBt.readBytesUntil(10, bfr, sizeof(bfr) - 1);
-  if ( nbrRead == 0 ) {
+  if (nbrRead == 0)
+  {
 #if defined(DEBUGGING_BT)
     Serial.println("error.");
 #endif
@@ -450,7 +680,8 @@ void checkBtName() {
   delay(200);
   sbBt.print("AT+NAME");
   nbrRead = sbBt.readBytesUntil(10, bfr, sizeof(bfr) - 1);
-  if ( nbrRead == 0 ) {
+  if (nbrRead == 0)
+  {
 #if defined(DEBUGGING_BT)
     Serial.println("error.");
 #endif
@@ -459,7 +690,8 @@ void checkBtName() {
 #if defined(DEBUGGING_BT)
   Serial.println(&bfr[6]);
 #endif
-  if ( strncmp(&bfr[6], "STEAMbot-", 9) == 0 ) {
+  if (strncmp(&bfr[6], "STEAMbot-", 9) == 0)
+  {
     return;
   }
   delay(200);
@@ -468,7 +700,8 @@ void checkBtName() {
 #endif
   sbBt.print("AT+MAC");
   nbrRead = sbBt.readBytesUntil(10, bfr, sizeof(bfr) - 1);
-  if ( nbrRead == 0 ) {
+  if (nbrRead == 0)
+  {
 #if defined(DEBUGGING_BT)
     Serial.println("error.");
 #endif
@@ -489,7 +722,8 @@ void checkBtName() {
   sbBt.print(newNameCmd);
   delay(500);
   nbrRead = sbBt.readBytesUntil(10, bfr, sizeof(bfr) - 1);
-  if ( nbrRead == 0 ) {
+  if (nbrRead == 0)
+  {
 #if defined(DEBUGGING_BT)
     Serial.println("error.");
 #endif
