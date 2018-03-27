@@ -1,7 +1,7 @@
 /*
    Copyright (c) 2017, The STEAM Train
 
-   Example Blink program.
+   Example Blink toggle program.
 
 */
 #include <STEAMbot.h>
