@@ -8,7 +8,7 @@
 #include <STEAMbot.h>
 #include <Servo.h>
 
-#define DEBUGGING_BT    //If defined, debugging information is sent to the Serial port (USB)
+//#define DEBUGGING_BT    //If defined, debugging information is sent to the Serial port (USB)
 //#define DO_LINE_MODE    //If you have the Line Following Add-on Kit, uncomment this line
 
 #define CR '\r'
