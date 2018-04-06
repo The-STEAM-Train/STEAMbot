@@ -38,7 +38,7 @@ sbTimer rgbTimer(500, true); //Auto restart timer
 Servo srv1, srv2, srv3;
 bool s1Configured, s2Configured, s3Configured;
 
-const char defaultProgramVersion[] = "1.1.1";
+const char defaultProgramVersion[] = "1.0.2";
 
 typedef enum movingState_t {
   movingBackward = -1,
