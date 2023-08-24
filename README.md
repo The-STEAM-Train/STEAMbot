@@ -1,5 +1,5 @@
 # STEAMbot
-The library for programming a STEAMbot robot by The STEAM Train.
+The library for programming a STEAMbot V1 robot by The STEAM Train.
 
 # Description
 This library contains an overall class for the STEAMbot components and several individual classes for the different inputs and outputs of the STEAMbot robot. The following classes are defined:
